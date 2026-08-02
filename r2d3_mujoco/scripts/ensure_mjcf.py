@@ -46,7 +46,7 @@ CHECKSUM_FILENAME = "checksum"
 URDF_FILENAME = "robot_input.urdf"
 # Bump when converter flags in build_converter_cmd change, or when
 # raise_lidar_scan_plane()'s patch logic changes, to invalidate caches.
-CONVERTER_ARGS_VERSION = "v6:save_only,add_free_joint,scene,lidar_scan_raise,wheel_primitives,base_inertial"
+CONVERTER_ARGS_VERSION = "v7:save_only,add_free_joint,scene,lidar_scan_raise,wheel_primitives,base_inertial,4c2"
 
 # --- Lidar scan-height fix ----------------------------------------------------------
 #
@@ -417,14 +417,54 @@ def converter_exit_acceptable(returncode: int, mjcf_path: Path) -> bool:
         and mjcf_parses_as_xml(mjcf_path)
     )
 
+def enforce_4c2_gripper_kinematics(mjcf_path: Path, model_name: str) -> bool:
+    """Injects equality constraints and gravity-resisting stiffness for the 4C2 gripper."""
+    if not model_name.endswith("_4c2"):
+        return True
 
-def finalize_conversion(mjcf_path: Path, cache_dir: Path, checksum: str, urdf_str: str) -> bool:
+    text = mjcf_path.read_text()
+
+    # 1. Add spring stiffness to main gripper joints to resist gravity.
+    # (We only add stiffness; URDF already provides damping).
+    text, _ = re.subn(
+        r'(<joint name="[lr]_gripper_joint"[^>]*?)(\s*/?>)',
+        r'\1 stiffness="50"\2',
+        text
+    )
+
+    # 2. Inject equality constraints for the parallel linkages
+    equality_block = """
+  <equality>
+    <joint joint1="l_gripper_joint" joint2="l_r_3_joint" polycoef="0 1 0 0 0"/>
+    <joint joint1="l_gripper_joint" joint2="l_l_1_joint" polycoef="0 1 0 0 0"/>
+    <joint joint1="l_gripper_joint" joint2="l_l_3_joint" polycoef="0 1 0 0 0"/>
+    <joint joint1="l_gripper_joint" joint2="l_r_2_joint" polycoef="0 1 0 0 0"/>
+    <joint joint1="l_gripper_joint" joint2="l_l_2_joint" polycoef="0 1 0 0 0"/>
+    
+    <joint joint1="r_gripper_joint" joint2="r_r_3_joint" polycoef="0 1 0 0 0"/>
+    <joint joint1="r_gripper_joint" joint2="r_l_1_joint" polycoef="0 1 0 0 0"/>
+    <joint joint1="r_gripper_joint" joint2="r_l_3_joint" polycoef="0 1 0 0 0"/>
+    <joint joint1="r_gripper_joint" joint2="r_r_2_joint" polycoef="0 1 0 0 0"/>
+    <joint joint1="r_gripper_joint" joint2="r_l_2_joint" polycoef="0 1 0 0 0"/>
+  </equality>"""
+
+    if "<equality>" in text:
+        inner_joints = equality_block.replace("<equality>", "").replace("</equality>", "")
+        text, _ = re.subn(r'</equality>', inner_joints + '\n  </equality>', text, count=1)
+    else:
+        text, _ = re.subn(r'</mujoco>', equality_block + '\n</mujoco>', text, count=1)
+
+    mjcf_path.write_text(text)
+    print("[ensure_mjcf] injected 4C2 parallel linkage equality constraints and joint stiffness", flush=True)
+    return True
+    
+def finalize_conversion(mjcf_path: Path, cache_dir: Path, checksum: str, urdf_str: str, model_name: str) -> bool:
     """Validate, patch, and mark the freshly converted MJCF as cached.
 
-    Applies (in order) the lidar scan-height raise, the wheel-collision primitives, and
-    the base_footprint inertial injection. Returns True only if the file is well-formed
-    XML and every patch matched its expected count; only then is the checksum written
-    (making the cache entry valid). Any failure leaves the cache entry invalid (no
+    Applies (in order) the lidar scan-height raise, the wheel-collision primitives,
+    the base_footprint inertial injection, and the 4C2 gripper kinematic constraints. 
+    Returns True only if the file is well-formed XML and every patch matched its expected count; 
+    only then is the checksum written (making the cache entry valid). Any failure leaves the cache entry invalid (no
     checksum) so the next launch reconverts, and the caller must NOT publish the model.
     """
     if not mjcf_parses_as_xml(mjcf_path):
@@ -489,6 +529,10 @@ def finalize_conversion(mjcf_path: Path, cache_dir: Path, checksum: str, urdf_st
         )
         return False
     print("[ensure_mjcf] injected true base_footprint inertial (fixes the ~962 kg phantom mass)", flush=True)
+
+    # ─── INJECT 4C2 GRIPPER KINEMATICS ────────────────────────────
+    if not enforce_4c2_gripper_kinematics(mjcf_path, model_name):
+        return False
 
     (cache_dir / CHECKSUM_FILENAME).write_text(checksum + "\n")
     return True
@@ -696,7 +740,7 @@ def main() -> int:
         print(f"[ensure_mjcf] conversion timed out or failed; {mjcf_path} not usable", flush=True)
         return 1
 
-    if not finalize_conversion(mjcf_path, cache_dir, checksum, args.robot_description):
+    if not finalize_conversion(mjcf_path, cache_dir, checksum, args.robot_description, args.model):
         return 1
 
     # Conversion is done; restore default signal handling so Ctrl-C/SIGTERM can
