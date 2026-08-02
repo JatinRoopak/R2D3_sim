@@ -14,7 +14,7 @@ from launch.actions import (
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node, PushRosNamespace
+from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 from moveit_configs_utils import MoveItConfigsBuilder
@@ -56,6 +56,23 @@ def generate_launch_description():
         default_value="true",
         description="Launch MoveIt2 move_group for arm planning",
     )
+    
+    # ── Missing Nav2 / SLAM Arguments ─────────────────────────────
+    declare_slam_type = DeclareLaunchArgument(
+        "slam_type",
+        default_value="slam_toolbox",
+        description="SLAM backend: slam_toolbox, rtabmap, or rtabmap_depth_only",
+    )
+    declare_nav2_params = DeclareLaunchArgument(
+        "nav2_params",
+        default_value=os.path.join(pkg_nav, "config", "nav2_params.yaml"),
+        description="Path to custom nav2 params file",
+    )
+    declare_slam_params = DeclareLaunchArgument(
+        "slam_params",
+        default_value=os.path.join(pkg_nav, "config", "slam_params.yaml"),
+        description="Path to custom SLAM params file",
+    )
 
     robot_model = LaunchConfiguration("robot_model")
     world = LaunchConfiguration("world")
@@ -63,6 +80,9 @@ def generate_launch_description():
     map_yaml = LaunchConfiguration("map")
     use_rviz = LaunchConfiguration("use_rviz")
     use_moveit = LaunchConfiguration("use_moveit")
+    slam_type = LaunchConfiguration("slam_type")
+    nav2_params = LaunchConfiguration("nav2_params")
+    slam_params = LaunchConfiguration("slam_params")
 
     # ── MoveIt parameters for RViz ────────────────────────────────
     moveit_config = MoveItConfigsBuilder(
@@ -84,6 +104,9 @@ def generate_launch_description():
                     "mode": mode,
                     "map": map_yaml,
                     "use_rviz": "false",
+                    "slam_type": slam_type,
+                    "nav2_params": nav2_params,
+                    "slam_params": slam_params,
                 }.items(),
             ),
         ],
@@ -129,6 +152,9 @@ def generate_launch_description():
             declare_map,
             declare_use_rviz,
             declare_use_moveit,
+            declare_slam_type,
+            declare_nav2_params,
+            declare_slam_params,
             nav_bringup,
             rviz_node,
             moveit_launch,
