@@ -18,6 +18,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
     RegisterEventHandler,
+    OpaqueFunction,
 )
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
@@ -29,42 +30,13 @@ from ament_index_python.packages import get_package_share_directory
 from moveit_configs_utils import MoveItConfigsBuilder
 
 
-def generate_launch_description():
+def launch_setup(context, *args, **kwargs):
     pkg_mujoco = get_package_share_directory("r2d3_mujoco")
     pkg_nav = get_package_share_directory("dual_rm_navigation")
     pkg_bringup = get_package_share_directory("r2d3_bringup")
 
-    declare_robot_model = DeclareLaunchArgument(
-        "robot_model", default_value="65b",
-        description="Robot model variant: 65b or 75b")
-    declare_world = DeclareLaunchArgument(
-        "world",
-        default_value=os.path.join(pkg_mujoco, "worlds", "nav_empty.xml"),
-        description="MuJoCo scene XML (full path)")
-    declare_mode = DeclareLaunchArgument(
-        "mode", default_value="slam",
-        description="'slam' for mapping, 'localization' for existing map")
-    declare_slam_type = DeclareLaunchArgument(
-        "slam_type", default_value="slam_toolbox",
-        description="SLAM backend: 'slam_toolbox', 'rtabmap', or 'rtabmap_depth_only'")
-    declare_map = DeclareLaunchArgument(
-        "map", default_value="",
-        description="Path to map YAML (localization + slam_toolbox)")
-    declare_use_rviz = DeclareLaunchArgument(
-        "use_rviz", default_value="true",
-        description="Launch RViz2")
-    declare_use_moveit = DeclareLaunchArgument(
-        "use_moveit", default_value="true",
-        description="Launch MoveIt2 move_group")
-    declare_headless = DeclareLaunchArgument(
-        "headless", default_value="false",
-        description="Run MuJoCo without the Simulate window")
-    declare_ready_timeout = DeclareLaunchArgument(
-        "ready_timeout", default_value="90.0",
-        description="Fallback: start Nav2/SLAM after this many seconds even if "
-                    "the sim never reports ready")
-
     robot_model = LaunchConfiguration("robot_model")
+    gripper_type = LaunchConfiguration("gripper_type")
     world = LaunchConfiguration("world")
     mode = LaunchConfiguration("mode")
     slam_type = LaunchConfiguration("slam_type")
@@ -74,15 +46,37 @@ def generate_launch_description():
     headless = LaunchConfiguration("headless")
     ready_timeout = LaunchConfiguration("ready_timeout")
 
+    robot_model_str = robot_model.perform(context)
+    gripper_type_str = gripper_type.perform(context)
+
+    # ── INJECT ENVIRONMENT VARIABLE ───────────────────────────────
+    os.environ["GRIPPER_TYPE"] = gripper_type_str
+
     nav2_params = os.path.join(pkg_nav, "config", "nav2_params.yaml")
     slam_params = os.path.join(pkg_nav, "config", "slam_toolbox_params.yaml")
     rtabmap_params = os.path.join(pkg_nav, "config", "rtabmap_params.yaml")
 
     # MoveIt parameters for the combined RViz view
-    moveit_config = MoveItConfigsBuilder(
-        "dual_rm_65b_description",
-        package_name="dual_rm_65b_moveit_config",
-    ).to_moveit_configs()
+    moveit_config = (
+        MoveItConfigsBuilder(
+            f"dual_rm_{robot_model_str}_description",
+            package_name=f"dual_rm_{robot_model_str}_moveit_config",
+        )
+        .robot_description(
+            mappings={
+                "arm_model": robot_model_str,
+                "gripper_type": gripper_type_str,
+            }
+        )
+        .robot_description_semantic(
+            file_path=f"config/dual_rm_{robot_model_str}_description.srdf.xacro",
+            mappings={
+                "arm_model": robot_model_str,
+                "gripper_type": gripper_type_str,
+            }
+        )
+        .to_moveit_configs()
+    )
 
     # 1. MuJoCo simulation (robot + controllers + sensors)
     sim_launch = IncludeLaunchDescription(
@@ -90,6 +84,7 @@ def generate_launch_description():
             os.path.join(pkg_mujoco, "launch", "mujoco_sim.launch.py")),
         launch_arguments={
             "robot_model": robot_model,
+            "gripper_type": gripper_type,
             "world": world,
             "headless": headless,
         }.items(),
@@ -111,8 +106,7 @@ def generate_launch_description():
         condition=IfCondition(use_rviz),
     )
 
-    # 3. Readiness gate: blocks until the sim can actually feed Nav2/SLAM,
-    #    then exits 0. Everything downstream fires off its exit (below).
+    # 3. Readiness gate: blocks until the sim can actually feed Nav2/SLAM
     sim_ready_gate = Node(
         package="r2d3_mujoco",
         executable="wait_for_sim_ready.py",
@@ -192,7 +186,10 @@ def generate_launch_description():
     moveit_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_bringup, "launch", "moveit_sim.launch.py")),
-        launch_arguments={"robot_model": robot_model}.items(),
+        launch_arguments={
+            "robot_model": robot_model,
+            "gripper_type": gripper_type,
+        }.items(),
         condition=IfCondition(use_moveit),
     )
 
@@ -213,18 +210,26 @@ def generate_launch_description():
         )
     )
 
-    return LaunchDescription([
-        declare_robot_model,
-        declare_world,
-        declare_mode,
-        declare_slam_type,
-        declare_map,
-        declare_use_rviz,
-        declare_use_moveit,
-        declare_headless,
-        declare_ready_timeout,
+    return [
         sim_launch,
         rviz_node,
         sim_ready_gate,
         start_stack_when_ready,
+    ]
+
+
+def generate_launch_description():
+    pkg_mujoco = get_package_share_directory("r2d3_mujoco")
+    return LaunchDescription([
+        DeclareLaunchArgument("robot_model", default_value="65b", description="Robot model variant: 65b or 75b"),
+        DeclareLaunchArgument("gripper_type", default_value="dummy", description="Gripper type: dummy or 4c2"),
+        DeclareLaunchArgument("world", default_value=os.path.join(pkg_mujoco, "worlds", "nav_empty.xml"), description="MuJoCo scene XML (full path)"),
+        DeclareLaunchArgument("mode", default_value="slam", description="'slam' for mapping, 'localization' for existing map"),
+        DeclareLaunchArgument("slam_type", default_value="slam_toolbox", description="SLAM backend: 'slam_toolbox', 'rtabmap', or 'rtabmap_depth_only'"),
+        DeclareLaunchArgument("map", default_value="", description="Path to map YAML (localization + slam_toolbox)"),
+        DeclareLaunchArgument("use_rviz", default_value="true", description="Launch RViz2"),
+        DeclareLaunchArgument("use_moveit", default_value="true", description="Launch MoveIt2 move_group"),
+        DeclareLaunchArgument("headless", default_value="false", description="Run MuJoCo without the Simulate window"),
+        DeclareLaunchArgument("ready_timeout", default_value="90.0", description="Fallback: start Nav2/SLAM after this many seconds"),
+        OpaqueFunction(function=launch_setup),
     ])

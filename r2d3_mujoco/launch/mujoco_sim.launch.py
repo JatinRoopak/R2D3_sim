@@ -24,15 +24,23 @@ def launch_setup(context, *args, **kwargs):
     pkg_mujoco = get_package_share_directory("r2d3_mujoco")
 
     robot_model = LaunchConfiguration("robot_model").perform(context)
+    gripper_type = LaunchConfiguration("gripper_type").perform(context)
     world = LaunchConfiguration("world").perform(context)
     headless = LaunchConfiguration("headless").perform(context)
     force_recompile = LaunchConfiguration("force_recompile").perform(context)
 
+    # ── INJECT ENVIRONMENT VARIABLE ───────────────────────────────
+    os.environ["GRIPPER_TYPE"] = gripper_type
+
     xacro_path = os.path.join(pkg_mujoco, "urdf", "r2d3_mujoco.urdf.xacro")
+    
+    # Pass the gripper_type argument to Xacro during compilation
     robot_description_str = Command([
         FindExecutable(name="xacro"), " ", xacro_path,
         " arm_model:=", robot_model,
+        " gripper_type:=", gripper_type,
         " headless:=", headless,
+        " use_gazebo:=false",
     ]).perform(context)
     robot_description = {
         "robot_description": ParameterValue(robot_description_str, value_type=str)
@@ -44,7 +52,7 @@ def launch_setup(context, *args, **kwargs):
     ensure_mjcf_args = [
         "--robot-description", robot_description_str,
         "--world", world,
-        "--model", robot_model,
+        "--model", f"{robot_model}_{gripper_type}",  # Cache by model AND gripper
         "--topic", "/mujoco_robot_description",
     ]
     if force_recompile == "true":
@@ -92,17 +100,26 @@ def launch_setup(context, *args, **kwargs):
         )
 
     jsb_spawner = spawner("joint_state_broadcaster")
+    
+    # Base controllers that always spawn
+    active_spawners = [
+        spawner("diff_drive_controller"),
+        spawner("left_arm_controller"),
+        spawner("right_arm_controller"),
+        spawner("platform_controller"),
+        spawner("neck_controller"),
+        spawner("imu_sensor_broadcaster"),
+    ]
+
+    # Only spawn gripper controllers if the 4C2 is attached
+    if gripper_type == "4c2":
+        active_spawners.append(spawner("l_gripper_controller"))
+        active_spawners.append(spawner("r_gripper_controller"))
+
     evt_jsb_done = RegisterEventHandler(
         event_handler=OnProcessExit(
             target_action=jsb_spawner,
-            on_exit=[
-                spawner("diff_drive_controller"),
-                spawner("left_arm_controller"),
-                spawner("right_arm_controller"),
-                spawner("platform_controller"),
-                spawner("neck_controller"),
-                spawner("imu_sensor_broadcaster"),
-            ],
+            on_exit=active_spawners,
         )
     )
 
@@ -148,8 +165,6 @@ def launch_setup(context, *args, **kwargs):
     )
 
     # -- /{side}_wrist/depth/color/points from each wrist D435 --
-    # Gz publishes `points` natively from its rgbd_camera; MuJoCo does not, so
-    # depth_image_proc completes the same topic contract on this sim.
     def _wrist_points(side):
         return ComposableNodeContainer(
             name=f"{side}_wrist_points_container",
@@ -161,13 +176,6 @@ def launch_setup(context, *args, **kwargs):
                     package="depth_image_proc",
                     plugin="depth_image_proc::PointCloudXyzrgbNode",
                     name=f"{side}_wrist_point_cloud_xyzrgb",
-                    # MuJoCo does not stamp colour and depth bit-identically (60-134ms
-                    # offsets observed), which starves depth_image_proc's default
-                    # exact-time synchroniser to ~85-90% frame loss. Use approximate
-                    # sync with a deep enough queue (~3s at ~10Hz) to absorb the jitter.
-                    # Trade-off: colour and depth may pair from slightly different
-                    # instants, so fast arm motion can smear cloud edges -- an
-                    # accepted trade-off, not a bug.
                     parameters=[{
                         "use_sim_time": True,
                         "approximate_sync": True,
@@ -204,18 +212,10 @@ def launch_setup(context, *args, **kwargs):
 def generate_launch_description():
     pkg_mujoco = get_package_share_directory("r2d3_mujoco")
     return LaunchDescription([
-        DeclareLaunchArgument(
-            "robot_model", default_value="65b",
-            description="Robot model variant: 65b or 75b"),
-        DeclareLaunchArgument(
-            "world",
-            default_value=os.path.join(pkg_mujoco, "worlds", "nav_empty.xml"),
-            description="Full path to the MuJoCo scene XML"),
-        DeclareLaunchArgument(
-            "headless", default_value="false",
-            description="Run MuJoCo without the Simulate window"),
-        DeclareLaunchArgument(
-            "force_recompile", default_value="false",
-            description="Force URDF->MJCF recompilation even if cached"),
+        DeclareLaunchArgument("robot_model", default_value="65b", description="Robot model variant: 65b or 75b"),
+        DeclareLaunchArgument("gripper_type", default_value="dummy", description="Gripper type: dummy or 4c2"),
+        DeclareLaunchArgument("world", default_value=os.path.join(pkg_mujoco, "worlds", "nav_empty.xml"), description="Full path to the MuJoCo scene XML"),
+        DeclareLaunchArgument("headless", default_value="false", description="Run MuJoCo without the Simulate window"),
+        DeclareLaunchArgument("force_recompile", default_value="false", description="Force URDF->MJCF recompilation even if cached"),
         OpaqueFunction(function=launch_setup),
     ])

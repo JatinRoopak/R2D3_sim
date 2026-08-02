@@ -26,6 +26,12 @@ controller_manager:
 
     imu_sensor_broadcaster:
       type: imu_sensor_broadcaster/IMUSensorBroadcaster
+    
+    l_gripper_controller:
+      type: position_controllers/GripperActionController
+
+    r_gripper_controller:
+      type: position_controllers/GripperActionController
 
 diff_drive_controller:
   ros__parameters:
@@ -116,3 +122,11 @@ imu_sensor_broadcaster:
   ros__parameters:
     sensor_name: imu_sensor_imu   # matches the ros2_control <sensor> name
     frame_id: imu_link
+
+l_gripper_controller:
+  ros__parameters:
+    joint: l_gripper_joint
+
+r_gripper_controller:
+  ros__parameters:
+    joint: r_gripper_joint
